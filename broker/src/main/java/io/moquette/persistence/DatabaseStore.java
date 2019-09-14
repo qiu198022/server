@@ -1153,7 +1153,7 @@ public class DatabaseStore {
                     statement.setInt(index++, request.getPlatform());
                 }
                 if (session.getPushType() != request.getPushType()) {
-                    statement.setInt(index++, request.getPushType());
+                    statement.setInt(index++, request.getPushType() >= 32 ? 0 : request.getPushType());
                 }
                 if (!strEqual(session.getDeviceName(), request.getDeviceName())) {
                     statement.setString(index++, request.getDeviceName());
@@ -1265,7 +1265,6 @@ public class DatabaseStore {
     }
 
     void persistGroupMember(final String groupId, final List<WFCMessage.GroupMember> memberList) {
-        mScheduler.execute(()->{
             Connection connection = null;
             PreparedStatement statement = null;
             try {
@@ -1321,7 +1320,6 @@ public class DatabaseStore {
             } finally {
                 DBUtil.closeDB(connection, statement);
             }
-        });
     }
 
     int removeGroupMember(String groupId, List<String> groupMembers) {
@@ -1806,7 +1804,6 @@ public class DatabaseStore {
 
     void updateUser(final WFCMessage.User user) {
         LOG.info("Database update user info {} {}", user.getUid(), user.getUpdateDt());
-        mScheduler.execute(()->{
             Connection connection = null;
             PreparedStatement statement = null;
             LOG.info("Database update user info {}", user.getDisplayName());
@@ -1880,7 +1877,6 @@ public class DatabaseStore {
             } finally {
                 DBUtil.closeDB(connection, statement);
             }
-        });
     }
 
     void deleteUserStatus(String userId) {
@@ -2383,7 +2379,6 @@ public class DatabaseStore {
 
     void updateChannelInfo(final WFCMessage.ChannelInfo channelInfo) {
         LOG.info("Database update channel info {} {}", channelInfo.getTargetId(), channelInfo.getUpdateDt());
-        mScheduler.execute(()->{
             Connection connection = null;
             PreparedStatement statement = null;
             try {
@@ -2446,7 +2441,6 @@ public class DatabaseStore {
             } finally {
                 DBUtil.closeDB(connection, statement);
             }
-        });
     }
 
     void removeChannelInfo(final String channelId) {
