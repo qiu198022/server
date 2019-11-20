@@ -30,9 +30,9 @@ import io.moquette.spi.IMatchingCondition;
 import io.moquette.spi.IMessagesStore;
 import io.moquette.spi.security.Tokenor;
 import io.moquette.spi.impl.subscriptions.Topic;
+import io.netty.handler.codec.mqtt.MqttVersion;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import sun.misc.BASE64Encoder;
 import win.liyufan.im.*;
 
 import java.security.MessageDigest;
@@ -349,7 +349,7 @@ public class MemoryMessagesStore implements IMessagesStore {
                         }
 
                         size += bundle.getMessage().getSerializedSize();
-                        if (size >= 1 * 1024 * 1024) { //3M
+                        if (size >= 512 * 1024) { //3M
                             break;
                         }
                         builder.addMessage(bundle.getMessage());
@@ -1039,25 +1039,31 @@ public class MemoryMessagesStore implements IMessagesStore {
 
         //check the new owner is in member list? is that necessary?
         long updateDt = System.currentTimeMillis();
-        groupInfo = groupInfo.toBuilder().setOwner(newOwner).setUpdateDt(updateDt).build();
-
+        groupInfo = groupInfo.toBuilder().setOwner(newOwner).setUpdateDt(updateDt).setMemberUpdateDt(updateDt).build();
         mIMap.set(groupId, groupInfo);
+
         MultiMap<String, WFCMessage.GroupMember> groupMembers = hzInstance.getMultiMap(GROUP_MEMBERS);
         Collection<WFCMessage.GroupMember> members = groupMembers.get(groupId);
         if (members == null || members.size() == 0) {
             members = loadGroupMemberFromDB(hzInstance, groupId);
         }
+        int modifyMemeberCount = 0;
         for (WFCMessage.GroupMember member : members) {
+            if (modifyMemeberCount == 2) {
+                break;
+            }
             if (newOwner.equals(member.getMemberId())) {
                 groupMembers.remove(groupId, member);
                 member = member.toBuilder().setType(GroupMemberType_Owner).setUpdateDt(updateDt).build();
                 databaseStore.persistGroupMember(groupId, Arrays.asList(member));
                 groupMembers.put(groupId, member);
+                modifyMemeberCount++;
             } else if(member.getType() == GroupMemberType_Owner) {
                 groupMembers.remove(groupId, member);
                 member = member.toBuilder().setType(GroupMemberType_Normal).setUpdateDt(updateDt).build();
                 databaseStore.persistGroupMember(groupId, Arrays.asList(member));
                 groupMembers.put(groupId, member);
+                modifyMemeberCount++;
             }
         }
 
@@ -1592,8 +1598,7 @@ public class MemoryMessagesStore implements IMessagesStore {
                 String pwd_md5 = rs.getString(2);
                 try {
                     MessageDigest md5 = MessageDigest.getInstance("MD5");
-                    BASE64Encoder base64en = new BASE64Encoder();
-                    String passwdMd5 = base64en.encode(md5.digest(password.getBytes("utf-8")));
+                    String passwdMd5 = Base64.getEncoder().encodeToString(md5.digest(password.getBytes("utf-8")));
                     if (passwdMd5.equals(pwd_md5)) {
                         LOG.info("login success userName={}, userId={}", name, uid);
                         userIdRet.add(uid);
@@ -1648,7 +1653,7 @@ public class MemoryMessagesStore implements IMessagesStore {
     }
 
     @Override
-    public List<FriendData> getFriendList(String userId, long version) {
+    public List<FriendData> getFriendList(String userId, String clientId, long version) {
         List<FriendData> out = new ArrayList<FriendData>();
 
         HazelcastInstance hzInstance = m_Server.getHazelcastInstance();
@@ -1658,9 +1663,26 @@ public class MemoryMessagesStore implements IMessagesStore {
             friends = loadFriend(friendsMap, userId);
         }
 
+        boolean needFriendMigrate = false;
+
+        if (!StringUtil.isNullOrEmpty(clientId)) {
+            MemorySessionStore.Session session = m_Server.getStore().sessionsStore().getSession(clientId);
+            if(session != null && session.getMqttVersion() != null && session.getMqttVersion().protocolLevel() < MqttVersion.Wildfire_2.protocolLevel()) {
+                needFriendMigrate = true;
+            }
+        }
+
         for (FriendData friend : friends) {
             if (friend.getTimestamp() > version) {
-                out.add(friend);
+                if (needFriendMigrate) {
+                    if (friend.getBlacked() > 0) {
+                        friend.setState(2);
+                    }
+                    out.add(friend);
+                } else {
+                    out.add(friend);
+                }
+
             }
         }
 
@@ -1715,6 +1737,24 @@ public class MemoryMessagesStore implements IMessagesStore {
                 return ErrorCode.ERROR_CODE_FRIEND_ALREADY_REQUEST;
             }
         }
+
+        MultiMap<String, FriendData> friendsMap = hzInstance.getMultiMap(USER_FRIENDS);
+
+        FriendData friendData1 = null;
+        Collection<FriendData> friendDatas = friendsMap.get(userId);
+        if (friendDatas == null || friendDatas.size() == 0) {
+            friendDatas = loadFriend(friendsMap, userId);
+        }
+        for (FriendData fd : friendDatas) {
+            if (fd.getFriendUid().equals(request.getTargetUid())) {
+                friendData1 = fd;
+                break;
+            }
+        }
+        if (friendData1 != null && friendData1.getBlacked() > 0) {
+            return ErrorCode.ERROR_CODE_IN_BLACK_LIST;
+        }
+
         WFCMessage.FriendRequest newRequest = WFCMessage.FriendRequest
             .newBuilder()
             .setFromUid(userId)
@@ -1766,7 +1806,7 @@ public class MemoryMessagesStore implements IMessagesStore {
                 }
             }
             if (friendData1 == null) {
-                friendData1 = new FriendData(userId, request.getTargetUid(), "", request.getStatus(), System.currentTimeMillis());
+                friendData1 = new FriendData(userId, request.getTargetUid(), "", request.getStatus(), 0, System.currentTimeMillis());
             } else {
                 friendData1.setState(request.getStatus());
                 friendData1.setTimestamp(System.currentTimeMillis());
@@ -1788,7 +1828,7 @@ public class MemoryMessagesStore implements IMessagesStore {
                     }
                 }
                 if (friendData2 == null) {
-                    friendData2 = new FriendData(request.getTargetUid(), userId, "", request.getStatus(), friendData1.getTimestamp());
+                    friendData2 = new FriendData(request.getTargetUid(), userId, "", request.getStatus(), 0, friendData1.getTimestamp());
                 } else {
                     friendsMap.remove(request.getTargetUid(), friendData2);
                     friendData2.setState(request.getStatus());
@@ -1829,10 +1869,10 @@ public class MemoryMessagesStore implements IMessagesStore {
                 databaseStore.persistOrUpdateFriendRequest(existRequest);
                 MultiMap<String, FriendData> friendsMap = hzInstance.getMultiMap(USER_FRIENDS);
 
-                FriendData friendData1 = new FriendData(userId, request.getTargetUid(), "", 0, System.currentTimeMillis());
+                FriendData friendData1 = new FriendData(userId, request.getTargetUid(), "", 0, 0, System.currentTimeMillis());
                 databaseStore.persistOrUpdateFriendData(friendData1);
 
-                FriendData friendData2 = new FriendData(request.getTargetUid(), userId, "", 0, friendData1.getTimestamp());
+                FriendData friendData2 = new FriendData(request.getTargetUid(), userId, "", 0, 0, friendData1.getTimestamp());
                 databaseStore.persistOrUpdateFriendData(friendData2);
 
                 requestMap.remove(userId);
@@ -1854,6 +1894,9 @@ public class MemoryMessagesStore implements IMessagesStore {
 
     @Override
     public ErrorCode blackUserRequest(String fromUser, String targetUserId, int state, long[] heads) {
+        if (state == 2) {
+            state = 1;
+        }
         HazelcastInstance hzInstance = m_Server.getHazelcastInstance();
         MultiMap<String, FriendData> friendsMap = hzInstance.getMultiMap(USER_FRIENDS);
 
@@ -1871,9 +1914,9 @@ public class MemoryMessagesStore implements IMessagesStore {
         }
 
         if (friendData == null) {
-            friendData = new FriendData(fromUser, targetUserId, "", state, System.currentTimeMillis());
+            friendData = new FriendData(fromUser, targetUserId, "", 1, state, System.currentTimeMillis());
         }
-        friendData.setState(state);
+        friendData.setBlacked(state);
         friendData.setTimestamp(System.currentTimeMillis());
 
 
@@ -2320,6 +2363,7 @@ public class MemoryMessagesStore implements IMessagesStore {
             words) {
             databaseStore.deleteSensitiveWord(word);
         }
+        lastUpdateSensitiveTime = 0;
         return true;
     }
 

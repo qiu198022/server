@@ -19,7 +19,6 @@ import com.xiaoleilu.loServer.model.FriendData;
 import io.moquette.spi.ClientSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import sun.misc.BASE64Encoder;
 import win.liyufan.im.DBUtil;
 import win.liyufan.im.MessageBundle;
 import win.liyufan.im.MessageShardingUtil;
@@ -56,8 +55,6 @@ public class DatabaseStore {
             statement = connection.prepareStatement(sql);
 
             statement.setString(1, userId);
-
-            statement.executeQuery();
 
             rs = statement.executeQuery();
             while (rs.next()) {
@@ -173,13 +170,17 @@ public class DatabaseStore {
             if (buzzy) {
                 sql += " where (`_display_name` like ? or `_name` = ? or `_mobile` = ?) ";
             } else {
-                sql += " where (`_display_name` = ? or `_name` = ? or `_mobile` = ?) ";
+                sql += " where (`_name` = ? or `_mobile` = ?) ";
             }
 
             sql += " and _type <> 2"; //can search normal user(0) and robot(1), can not search things
 
-            sql += " limit 20";
-
+            if (buzzy) {
+                sql += " limit 20";
+            } else {
+                sql += " limit 1";
+            }
+            
             if (page > 0) {
                 sql += "offset = '" + page * 20 + "'";
             }
@@ -189,9 +190,8 @@ public class DatabaseStore {
             int index = 1;
             if (buzzy) {
                 statement.setString(index++, "%" + keyword + "%");
-            } else {
-                statement.setString(index++, keyword);
             }
+
             statement.setString(index++, keyword);
             statement.setString(index++, keyword);
 
@@ -350,7 +350,7 @@ public class DatabaseStore {
 
         try {
             connection = DBUtil.getConnection();
-            String sql = "select `_uid`, `_friend_uid`, `_alias`, `_state`, `_dt` from t_friend";
+            String sql = "select `_uid`, `_friend_uid`, `_alias`, `_state`, `_blacked`, `_dt` from t_friend";
             statement = connection.prepareStatement(sql);
 
             int index;
@@ -374,6 +374,9 @@ public class DatabaseStore {
 
                 int intvalue = rs.getInt(index++);
                 builder.setState(intvalue);
+
+                intvalue = rs.getInt(index++);
+                builder.setBlacked(intvalue);
 
                 long longvalue = rs.getLong(index++);
                 builder.setTimestamp(longvalue);
@@ -1628,8 +1631,7 @@ public class DatabaseStore {
 
                 try {
                     MessageDigest md5 = MessageDigest.getInstance("MD5");
-                    BASE64Encoder base64en = new BASE64Encoder();
-                    String passwdMd5 = base64en.encode(md5.digest(password.getBytes("utf-8")));
+                    String passwdMd5 = Base64.getEncoder().encodeToString(md5.digest(password.getBytes("utf-8")));
                     statement.setString(index, passwdMd5);
                 } catch (Exception e) {
                     statement.setString(index, "");
@@ -2140,7 +2142,7 @@ public class DatabaseStore {
         ResultSet rs = null;
         try {
             connection = DBUtil.getConnection();
-            String sql = "select `_friend_uid`, `_alias`, `_state`, `_dt` from t_friend where `_uid` = ?";
+            String sql = "select `_friend_uid`, `_alias`, `_state`, `_blacked`, `_dt` from t_friend where `_uid` = ?";
             statement = connection.prepareStatement(sql);
 
 
@@ -2154,9 +2156,10 @@ public class DatabaseStore {
                 String uid = rs.getString(1);
                 String alias = rs.getString(2);
                 int state = rs.getInt(3);
-                long timestamp = rs.getLong(4);
+                int blacked = rs.getInt(4);
+                long timestamp = rs.getLong(5);
 
-                FriendData data = new FriendData(userId, uid, alias, state, timestamp);
+                FriendData data = new FriendData(userId, uid, alias, state, blacked, timestamp);
                 out.add(data);
             }
             return out;
@@ -2306,10 +2309,11 @@ public class DatabaseStore {
             PreparedStatement statement = null;
             try {
                 connection = DBUtil.getConnection();
-                String sql = "insert into t_friend (`_uid`, `_friend_uid`, `_alias`, `_state`, `_dt`) values(?, ?, ?, ?, ?)" +
+                String sql = "insert into t_friend (`_uid`, `_friend_uid`, `_alias`, `_state`, `_blacked`, `_dt`) values(?, ?, ?, ?, ?, ?)" +
                     " ON DUPLICATE KEY UPDATE " +
                     "`_alias` = ?," +
                     "`_state` = ?," +
+                    "`_blacked` = ?," +
                     "`_dt` = ?";
 
 
@@ -2319,9 +2323,11 @@ public class DatabaseStore {
                 statement.setString(index++, request.getFriendUid());
                 statement.setString(index++, request.getAlias());
                 statement.setInt(index++, request.getState());
+                statement.setInt(index++, request.getBlacked());
                 statement.setLong(index++, request.getTimestamp());
                 statement.setString(index++, request.getAlias());
                 statement.setInt(index++, request.getState());
+                statement.setInt(index++, request.getBlacked());
                 statement.setLong(index++, request.getTimestamp());
                 int count = statement.executeUpdate();
                 LOG.info("Update rows {}", count);
